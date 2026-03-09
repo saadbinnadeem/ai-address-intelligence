@@ -1,0 +1,17 @@
+node_modules/
+.next/
+out/
+build/
+.env
+.env.local
+.env.*
+
+venv/
+env/
+__pycache__/
+*.pyc
+
+saved_address_model/
+dataset.json
+
+.DS_Store
