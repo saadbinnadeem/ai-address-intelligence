@@ -5,6 +5,13 @@ import spacy
 import json
 import re
 import os
+import en_core_web_sm
+
+# Use this to load the base model
+nlp_base = en_core_web_sm.load()
+
+# Or use the string name if you prefer
+# nlp_base = spacy.load("en_core_web_sm")
 
 app = FastAPI()
 
