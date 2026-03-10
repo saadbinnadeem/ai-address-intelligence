@@ -2,16 +2,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import spacy
-import json
 import re
-import os
-import en_core_web_sm
-
-# Use this to load the base model
-nlp_base = en_core_web_sm.load()
-
-# Or use the string name if you prefer
-# nlp_base = spacy.load("en_core_web_sm")
 
 app = FastAPI()
 
@@ -47,6 +38,19 @@ TOWN_CITY_MAP = {
     "nishtar": "lahore", "bahria town lahore": "lahore"
 }
 
+AREA_TOWN_MAP = {
+    "jinnah square": "malir town",
+    "falaknaz dreams": "malir town",
+    "model colony": "malir town",
+    "kati pahari": "north nazimabad town",
+    "water pump": "federal b area",
+    "mukka chowk": "azizabad",
+    "teen talwar": "clifton",
+    "do talwar": "clifton",
+    "tariq road": "pechs",
+    "bahadurabad": "pechs"
+}
+
 DIRECT_REPLACE_MAP = {
     "makan num": "House No", "makkan no": "House No", "makan no": "House No",
     "flat no": "Flat No", "block no": "Block", "building no": "Building",
@@ -55,12 +59,21 @@ DIRECT_REPLACE_MAP = {
 
 POSITIONAL_MAP = {
     "ke piche wali gli me": "Street Behind", "ke piche wali gali me": "Street Behind",
+    "ki piche wali gli me": "Street Behind", "ki piche wali gali me": "Street Behind",
     "ke peeche wali gli me": "Street Behind", "ke peeche wali gali me": "Street Behind",
+    "ki peeche wali gli me": "Street Behind", "ki peeche wali gali me": "Street Behind",
     "ke samne wali gli me": "Street Opposite", "ke samne wali gali me": "Street Opposite",
+    "ki samne wali gli me": "Street Opposite", "ki samne wali gali me": "Street Opposite",
     "ke baghal wali gli me": "Street Adjacent To", "ke baghal wali gali me": "Street Adjacent To",
-    "ke pass": "Near", "ke samne": "Opposite", "ke peeche": "Behind", "ke piche": "Behind",
-    "ke baghal me": "Adjacent To", "ke baraber me": "Adjacent To", "ke barabar me": "Adjacent To",
-    "ki back side pe": "Behind"
+    "ki baghal wali gli me": "Street Adjacent To", "ki baghal wali gali me": "Street Adjacent To",
+    "ke pass": "Near", "ki pass": "Near", 
+    "ke samne": "Opposite", "ki samne": "Opposite", 
+    "ke peeche": "Behind", "ke piche": "Behind", 
+    "ki peeche": "Behind", "ki piche": "Behind",
+    "ke baghal me": "Adjacent To", "ki baghal me": "Adjacent To", 
+    "ke baraber me": "Adjacent To", "ke barabar me": "Adjacent To",
+    "ki baraber me": "Adjacent To", "ki barabar me": "Adjacent To",
+    "ki back side pe": "Behind", "ke back side pe": "Behind"
 }
 
 FORMAT_ORDER = ["BUILDING", "UNIT", "BLOCK", "STREET", "SOCIETY", "AREA", "TOWN", "LANDMARK", "CITY", "PROVINCE"]
@@ -97,7 +110,14 @@ async def parse_address(request: AddressRequest):
     for ent in doc.ents:
         extracted[ent.label_] = ent.text
         mapped_chars += len(ent.text.replace(" ", ""))
-        
+    
+    if "TOWN" not in extracted:
+        check_string = (extracted.get("AREA", "") + " " + extracted.get("SOCIETY", "")).lower()
+        for area_key, town_val in AREA_TOWN_MAP.items():
+            if area_key in check_string:
+                extracted["TOWN"] = town_val
+                break
+
     if "CITY" not in extracted:
         check_string = (extracted.get("TOWN", "") + " " + extracted.get("SOCIETY", "")).lower()
         for town_key, city_val in TOWN_CITY_MAP.items():
