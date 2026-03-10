@@ -56,7 +56,8 @@ def apply_random_casing(text):
     else:
         return text.upper()
 
-def generate_massive_dataset(num_records=10000):
+def generate_massive_dataset(num_records=1000):
+    print(f"Generating {num_records} records...")
     dataset = []
     for _ in range(num_records):
         template = random.choice(TEMPLATES)
@@ -77,16 +78,20 @@ def generate_massive_dataset(num_records=10000):
         })
     with open("dataset.json", "w", encoding="utf-8") as f:
         json.dump(dataset, f, indent=2)
+    print("Dataset generation complete.")
 
 def load_dataset_from_json(file_path):
+    print("Loading dataset...")
     with open(file_path, 'r', encoding='utf-8') as f:
         data = json.load(f)
     formatted_data = []
     for item in data:
         formatted_data.append((item["text"], {"entities": item["entities"]}))
+    print("Dataset loaded.")
     return formatted_data
 
-def train_address_ner_fast(training_data, iterations=150, output_dir="saved_address_model"):
+def train_address_ner_fast(training_data, iterations=30, output_dir="saved_address_model"):
+    print("Starting NER model training...")
     nlp = spacy.blank("en")
     if "ner" not in nlp.pipe_names:
         ner = nlp.add_pipe("ner", last=True)
@@ -108,14 +113,17 @@ def train_address_ner_fast(training_data, iterations=150, output_dir="saved_addr
                 examples.append(Example.from_dict(doc, annotations))
             nlp.update(examples, drop=0.35, sgd=optimizer, losses=losses)
         current_loss = losses.get('ner', 0)
+        print(f"Iteration {itn + 1}/{iterations} - Loss: {current_loss:.4f}")
         
         if current_loss < 0.5:
+            print("Target loss reached. Stopping training.")
             break
             
     nlp.to_disk(output_dir)
+    print("Model saved successfully.")
     return nlp
 
 if __name__ == "__main__":
-    generate_massive_dataset(10000)
+    generate_massive_dataset(1000)
     TRAIN_DATA = load_dataset_from_json("dataset.json")
-    train_address_ner_fast(TRAIN_DATA, 150, "saved_address_model")
+    train_address_ner_fast(TRAIN_DATA, 30, "saved_address_model")
