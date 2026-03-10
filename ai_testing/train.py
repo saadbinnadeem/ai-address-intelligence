@@ -162,7 +162,7 @@ def train_address_ner_fast(training_data, output_dir="saved_address_model"):
             print("Target near-zero loss reached. Stopping training.")
             break
             
-        if itn >= 200:
+        if itn >= 500:
             print("Failsafe limit reached to prevent cloud timeout. Stopping training.")
             break
             
