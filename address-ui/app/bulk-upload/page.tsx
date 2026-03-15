@@ -1,19 +1,25 @@
 "use client";
 
 import { useMemo, useState } from "react";
+import { Download } from "lucide-react";
 import { parseBulkAddressFile } from "@/lib/api";
 import type { BulkResponse } from "@/lib/types";
-import { Card } from "@/components/ui/card";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
 import { PageShell } from "@/components/ui/page-shell";
+import { Skeleton } from "@/components/ui/skeleton";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { useToast } from "@/hooks/use-toast";
 
 const isValidFile = (file: File) => ["text/csv", "application/pdf"].includes(file.type);
 
 const createCsv = (rows: BulkResponse) => {
   const header = ["original", "city", "area", "normalized_address"];
   const body = rows.map((item) => [item.original, item.structured.city ?? "", item.structured.area ?? "", item.structured.normalized_address ?? ""]);
-  return [header, ...body]
-    .map((line) => line.map((cell) => `"${String(cell).replaceAll('"', '""')}"`).join(","))
-    .join("\n");
+  return [header, ...body].map((line) => line.map((cell) => `"${String(cell).replaceAll('"', '""')}"`).join(",")).join("\n");
 };
 
 export default function BulkUploadPage() {
@@ -22,13 +28,12 @@ export default function BulkUploadPage() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [results, setResults] = useState<BulkResponse>([]);
+  const { toast } = useToast();
 
   const csvContent = useMemo(() => createCsv(results), [results]);
 
   const onUpload = async () => {
-    if (!file) {
-      return;
-    }
+    if (!file) return;
     setError(null);
     setLoading(true);
     setResults([]);
@@ -36,8 +41,11 @@ export default function BulkUploadPage() {
     try {
       const data = await parseBulkAddressFile(file, setUploadProgress);
       setResults(data);
+      toast({ title: "Bulk parsing complete", description: `${data.length} addresses processed.` });
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Unknown error");
+      const message = err instanceof Error ? err.message : "Unknown error";
+      setError(message);
+      toast({ title: "Upload failed", description: message, variant: "destructive" });
     } finally {
       setLoading(false);
     }
@@ -53,13 +61,15 @@ export default function BulkUploadPage() {
   };
 
   return (
-    <PageShell>
-      <div className="space-y-6">
-        <Card>
-          <h1 className="text-2xl font-semibold">Bulk Address Upload</h1>
-          <p className="mt-2 text-sm text-slate-600">Upload CSV or PDF files to parse addresses in-memory with Gemini.</p>
-          <div className="mt-4 flex flex-col gap-3 md:flex-row md:items-center">
-            <input
+    <PageShell className="space-y-6">
+      <Card>
+        <CardHeader>
+          <CardTitle>Bulk Address Upload</CardTitle>
+          <CardDescription>Upload CSV or PDF files and parse addresses in-memory with full progress tracking.</CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="grid gap-3 md:grid-cols-[1fr_auto]">
+            <Input
               type="file"
               accept=".csv,.pdf"
               onChange={(event) => {
@@ -67,53 +77,49 @@ export default function BulkUploadPage() {
                 setFile(selected);
                 setError(selected && !isValidFile(selected) ? "Only CSV and PDF files are allowed." : null);
               }}
-              className="w-full rounded-md border p-2 text-sm"
             />
-            <button
-              onClick={onUpload}
-              disabled={!file || !!(file && !isValidFile(file)) || loading}
-              className="rounded-md bg-slate-900 px-4 py-2 text-white disabled:opacity-60"
-            >
-              {loading ? "Processing..." : "Upload and Parse"}
-            </button>
+            <Button onClick={onUpload} disabled={!file || !!(file && !isValidFile(file)) || loading}>{loading ? "Processing..." : "Upload and Parse"}</Button>
           </div>
-          <div className="mt-4 h-2 w-full rounded-full bg-slate-200">
-            <div className="h-2 rounded-full bg-violet-600 transition-all" style={{ width: `${uploadProgress}%` }} />
-          </div>
-          {error ? <p className="mt-3 rounded-md bg-red-50 p-2 text-sm text-red-700">{error}</p> : null}
-        </Card>
+          <div className="h-2 w-full overflow-hidden rounded-full bg-muted"><div className="h-full bg-primary transition-all" style={{ width: `${uploadProgress}%` }} /></div>
+          <div className="flex items-center justify-between text-sm text-muted-foreground"><span>{file?.name ?? "No file selected"}</span><Badge className="bg-secondary text-secondary-foreground">{uploadProgress}%</Badge></div>
+          {error ? <Alert className="border-destructive/40"><AlertTitle>Error</AlertTitle><AlertDescription>{error}</AlertDescription></Alert> : null}
+        </CardContent>
+      </Card>
 
-        <Card>
-          <div className="mb-4 flex items-center justify-between">
-            <h2 className="text-xl font-semibold">Results</h2>
-            <button onClick={download} disabled={!results.length} className="rounded-md border px-4 py-2 text-sm disabled:opacity-50">
-              Download CSV
-            </button>
+      <Card>
+        <CardHeader className="flex-row items-center justify-between space-y-0">
+          <div>
+            <CardTitle>Results Table</CardTitle>
+            <CardDescription>Review parsed output and export directly as CSV.</CardDescription>
           </div>
-          <div className="overflow-x-auto">
-            <table className="w-full min-w-[640px] text-sm">
-              <thead>
-                <tr className="border-b bg-slate-50 text-left">
-                  <th className="px-3 py-2">Original Address</th>
-                  <th className="px-3 py-2">City</th>
-                  <th className="px-3 py-2">Area</th>
-                  <th className="px-3 py-2">Normalized Address</th>
-                </tr>
-              </thead>
-              <tbody>
+          <Button variant="outline" onClick={download} disabled={!results.length}><Download className="h-4 w-4" /> Download CSV</Button>
+        </CardHeader>
+        <CardContent>
+          {loading ? <div className="space-y-2">{Array.from({ length: 6 }).map((_, index) => <Skeleton key={index} className="h-12 w-full" />)}</div> : null}
+          {!loading && (
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Original Address</TableHead>
+                  <TableHead>City</TableHead>
+                  <TableHead>Area</TableHead>
+                  <TableHead>Normalized Address</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
                 {results.map((item) => (
-                  <tr key={`${item.original}-${item.structured.normalized_address}`} className="border-b last:border-none">
-                    <td className="px-3 py-2">{item.original}</td>
-                    <td className="px-3 py-2">{item.structured.city ?? "-"}</td>
-                    <td className="px-3 py-2">{item.structured.area ?? "-"}</td>
-                    <td className="px-3 py-2">{item.structured.normalized_address || "-"}</td>
-                  </tr>
+                  <TableRow key={`${item.original}-${item.structured.normalized_address}`}>
+                    <TableCell>{item.original}</TableCell>
+                    <TableCell>{item.structured.city ?? "-"}</TableCell>
+                    <TableCell>{item.structured.area ?? "-"}</TableCell>
+                    <TableCell className="font-medium">{item.structured.normalized_address || "-"}</TableCell>
+                  </TableRow>
                 ))}
-              </tbody>
-            </table>
-          </div>
-        </Card>
-      </div>
+              </TableBody>
+            </Table>
+          )}
+        </CardContent>
+      </Card>
     </PageShell>
   );
 }
