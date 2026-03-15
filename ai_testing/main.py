@@ -15,7 +15,7 @@ from pypdf import PdfReader
 
 
 class Settings(BaseModel):
-    gemini_api_key: str = Field(default_factory=lambda: os.getenv("GEMINI_API_KEY", ""))
+    gemini_api_key: str = Field(default_factory=lambda: os.getenv("GEMINI_API_KEY", "AIzaSyCLKJCfZUJ6ay3kyHj0fLn1ZNo5G4sn07c"))
     cors_origin: str = Field(default_factory=lambda: os.getenv("CORS_ORIGIN", "http://localhost:3000"))
 
 
