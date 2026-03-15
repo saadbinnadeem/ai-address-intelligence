@@ -14,11 +14,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, ValidationError
 from pypdf import PdfReader
 
-
 class Settings(BaseModel):
     gemini_api_key: str = Field(default_factory=lambda: os.getenv("GEMINI_API_KEY", ""))
     cors_origin: str = Field(default_factory=lambda: os.getenv("CORS_ORIGIN", "*"))
-
+    model_name: str = "gemini-3.1-flash-lite-preview"
 
 settings = Settings()
 
@@ -26,14 +25,13 @@ if not settings.gemini_api_key:
     raise RuntimeError("GEMINI_API_KEY environment variable is not set")
 
 genai.configure(api_key=settings.gemini_api_key)
-model = genai.GenerativeModel("gemini-1.5-flash")
+model = genai.GenerativeModel(
+    model_name=settings.model_name,
+    generation_config={"response_mime_type": "application/json"}
+)
 
-prompt_template = """You are an address parsing engine specialized for Pakistan and India.
-Users may write addresses in English, Roman Urdu, Roman Hindi, or informal spelling.
-Extract structured fields. Recognize abbreviations like dha, ph, blk, st, rd, apt, pl.
-Return ONLY valid JSON with these fields:
-house_number, plot_number, street, block, phase, area, city, state, country, landmark, normalized_address."""
-
+prompt_template = """Extract address components for India/Pakistan (supports Roman Urdu/Hindi). 
+Return JSON: house_number, plot_number, street, block, phase, area, city, state, country, landmark, normalized_address."""
 
 class StructuredAddress(BaseModel):
     house_number: str | None = None
@@ -48,22 +46,18 @@ class StructuredAddress(BaseModel):
     landmark: str | None = None
     normalized_address: str = ""
 
-
 class ParseAddressRequest(BaseModel):
     address: str
-
 
 class ParseAddressResponse(BaseModel):
     original: str
     structured: StructuredAddress
 
-
 class BulkItem(BaseModel):
     original: str
     structured: StructuredAddress
 
-
-app = FastAPI(title="AI Address Parsing Platform", version="1.0.0")
+app = FastAPI(title="AI Address Parsing Platform", version="1.1.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -73,26 +67,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-
-def _extract_json(text: str) -> dict[str, Any]:
-    cleaned = text.strip().replace("```json", "").replace("```", "")
-    match = re.search(r"\{.*\}", cleaned, flags=re.DOTALL)
-    if not match:
-        raise ValueError("Gemini response did not include valid JSON")
-    return json.loads(match.group(0))
-
-
 def _parse_with_gemini(address: str) -> StructuredAddress:
-    response = model.generate_content(f"{prompt_template}\n\nAddress: {address}")
-    parsed = _extract_json(response.text or "")
-    return StructuredAddress.model_validate(parsed)
-
+    response = model.generate_content(f"{prompt_template}\nAddress: {address}")
+    return StructuredAddress.model_validate_json(response.text)
 
 def _extract_csv_addresses(data: bytes) -> list[str]:
     text = data.decode("utf-8", errors="ignore")
     reader = csv.reader(io.StringIO(text))
     return list(dict.fromkeys(cell.strip() for row in reader for cell in row if cell and len(cell.strip()) > 2))
-
 
 def _extract_pdf_addresses(data: bytes) -> list[str]:
     reader = PdfReader(io.BytesIO(data))
@@ -101,11 +83,9 @@ def _extract_pdf_addresses(data: bytes) -> list[str]:
         lines.extend(part.strip() for part in (page.extract_text() or "").splitlines())
     return list(dict.fromkeys(line for line in lines if len(line) > 2))
 
-
 @app.get("/health")
 def health() -> dict[str, str]:
-    return {"status": "ok"}
-
+    return {"status": "ok", "model": settings.model_name}
 
 @app.post("/api/address/parse", response_model=ParseAddressResponse)
 def parse_address(payload: ParseAddressRequest) -> ParseAddressResponse:
@@ -115,11 +95,8 @@ def parse_address(payload: ParseAddressRequest) -> ParseAddressResponse:
     try:
         structured = _parse_with_gemini(address)
         return ParseAddressResponse(original=address, structured=structured)
-    except (ValueError, json.JSONDecodeError, ValidationError) as exc:
-        raise HTTPException(status_code=502, detail=f"Invalid Gemini response: {exc}")
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
-
 
 @app.post("/api/address/bulk", response_model=list[BulkItem])
 async def parse_bulk(file: UploadFile = File(...)) -> list[BulkItem]:
@@ -128,23 +105,18 @@ async def parse_bulk(file: UploadFile = File(...)) -> list[BulkItem]:
 
     content = await file.read()
     name = file.filename.lower()
-    content_type = file.content_type or ""
-
-    if name.endswith(".csv") or "csv" in content_type:
+    
+    if name.endswith(".csv"):
         addresses = _extract_csv_addresses(content)
-    elif name.endswith(".pdf") or "pdf" in content_type:
+    elif name.endswith(".pdf"):
         addresses = _extract_pdf_addresses(content)
     else:
-        raise HTTPException(status_code=400, detail="Only CSV and PDF supported")
-
-    if not addresses:
-        raise HTTPException(status_code=400, detail="No valid addresses found")
+        raise HTTPException(status_code=400, detail="Unsupported format")
 
     results: list[BulkItem] = []
     for address in addresses:
         try:
-            structured = _parse_with_gemini(address)
-            results.append(BulkItem(original=address, structured=structured))
+            results.append(BulkItem(original=address, structured=_parse_with_gemini(address)))
         except:
             continue
     return results
