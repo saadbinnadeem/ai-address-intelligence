@@ -1,147 +1,194 @@
-from fastapi import FastAPI, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-import spacy
-import re
+from __future__ import annotations
 
-app = FastAPI()
+import csv
+import io
+import json
+import os
+import re
+from typing import Any
+
+import google.generativeai as genai
+from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field, ValidationError
+from pypdf import PdfReader
+
+
+class Settings(BaseModel):
+    gemini_api_key: str = Field(default_factory=lambda: os.getenv("GEMINI_API_KEY", ""))
+    cors_origin: str = Field(default_factory=lambda: os.getenv("CORS_ORIGIN", "http://localhost:3000"))
+
+
+settings = Settings()
+if not settings.gemini_api_key:
+    raise RuntimeError("GEMINI_API_KEY is required")
+
+
+genai.configure(api_key=settings.gemini_api_key)
+model = genai.GenerativeModel("gemini-1.5-flash")
+
+prompt_template = """You are an address parsing engine specialized for Pakistan and India.
+
+Users may write addresses in:
+- English
+- Roman Urdu
+- Roman Hindi
+- Informal spelling
+
+Extract structured fields from the address.
+
+Recognize abbreviations:
+
+dha → DHA (Defence Housing Authority)
+ph → Phase
+blk → Block
+st → Street
+rd → Road
+apt → Apartment
+pl → Plot
+
+Recognize landmarks such as:
+
+near
+opposite
+beside
+behind
+
+Return JSON with these fields:
+
+house_number
+plot_number
+street
+block
+phase
+area
+city
+state
+country
+landmark
+normalized_address
+
+Return only valid JSON."""
+
+
+class StructuredAddress(BaseModel):
+    house_number: str | None = None
+    plot_number: str | None = None
+    street: str | None = None
+    block: str | None = None
+    phase: str | None = None
+    area: str | None = None
+    city: str | None = None
+    state: str | None = None
+    country: str | None = None
+    landmark: str | None = None
+    normalized_address: str = ""
+
+
+class ParseAddressRequest(BaseModel):
+    address: str
+
+
+class ParseAddressResponse(BaseModel):
+    original: str
+    structured: StructuredAddress
+
+
+class BulkItem(BaseModel):
+    original: str
+    structured: StructuredAddress
+
+
+app = FastAPI(title="AI Address Parsing Platform", version="1.0.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[settings.cors_origin],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-MODEL_DIR = "saved_address_model"
 
-try:
-    nlp_model = spacy.load(MODEL_DIR)
-except Exception as e:
-    raise RuntimeError(f"Failed to load model from {MODEL_DIR}.")
+def _extract_json(text: str) -> dict[str, Any]:
+    cleaned = text.strip().replace("```json", "").replace("```", "")
+    match = re.search(r"\{.*\}", cleaned, flags=re.DOTALL)
+    if not match:
+        raise ValueError("Gemini response did not include valid JSON")
+    return json.loads(match.group(0))
 
-CITY_PROVINCE_MAP = {
-    "karachi": "Sindh", "lahore": "Punjab", "peshawar": "KPK",
-    "quetta": "Balochistan", "islamabad": "Federal Territory",
-    "hyderabad": "Sindh", "multan": "Punjab", "faisalabad": "Punjab"
-}
 
-TOWN_CITY_MAP = {
-    "malir": "karachi", "baldia": "karachi", "bin qasim": "karachi", "gadap": "karachi",
-    "gulshan-e-iqbal": "karachi", "jamshed": "karachi", "kemari": "karachi", "korangi": "karachi",
-    "landhi": "karachi", "liaquatabad": "karachi", "lyari": "karachi", "new karachi": "karachi",
-    "north karachi": "karachi", "north nazimabad": "karachi", "orangi": "karachi", "saddar": "karachi",
-    "shah faisal": "karachi", "site town": "karachi", "surjani": "karachi", "falaknaz": "karachi",
-    "bahria town karachi": "karachi", "ravi town": "lahore", "shalimar": "lahore", "wagah": "lahore",
-    "aziz bhatti": "lahore", "data ganj bakhsh": "lahore", "samanabad": "lahore", "iqbal town": "lahore",
-    "nishtar": "lahore", "bahria town lahore": "lahore"
-}
+def _parse_with_gemini(address: str) -> StructuredAddress:
+    response = model.generate_content(f"{prompt_template}\n\nAddress: {address}")
+    parsed = _extract_json(response.text or "")
+    return StructuredAddress.model_validate(parsed)
 
-AREA_TOWN_MAP = {
-    "jinnah square": "malir town",
-    "falaknaz dreams": "malir town",
-    "model colony": "malir town",
-    "kati pahari": "north nazimabad town",
-    "water pump": "federal b area",
-    "mukka chowk": "azizabad",
-    "teen talwar": "clifton",
-    "do talwar": "clifton",
-    "tariq road": "pechs",
-    "bahadurabad": "pechs"
-}
 
-DIRECT_REPLACE_MAP = {
-    "makan num": "House No", "makkan no": "House No", "makan no": "House No",
-    "flat no": "Flat No", "block no": "Block", "building no": "Building",
-    "gli": "Street", "gali": "Street", "wali": ""
-}
+def _extract_csv_addresses(data: bytes) -> list[str]:
+    text = data.decode("utf-8", errors="ignore")
+    reader = csv.reader(io.StringIO(text))
+    values = [cell.strip() for row in reader for cell in row if cell and cell.strip()]
+    deduped = list(dict.fromkeys(value for value in values if len(value) > 2))
+    return deduped
 
-POSITIONAL_MAP = {
-    "ke piche wali gli me": "Street Behind", "ke piche wali gali me": "Street Behind",
-    "ki piche wali gli me": "Street Behind", "ki piche wali gali me": "Street Behind",
-    "ke peeche wali gli me": "Street Behind", "ke peeche wali gali me": "Street Behind",
-    "ki peeche wali gli me": "Street Behind", "ki peeche wali gali me": "Street Behind",
-    "ke samne wali gli me": "Street Opposite", "ke samne wali gali me": "Street Opposite",
-    "ki samne wali gli me": "Street Opposite", "ki samne wali gali me": "Street Opposite",
-    "ke baghal wali gli me": "Street Adjacent To", "ke baghal wali gali me": "Street Adjacent To",
-    "ki baghal wali gli me": "Street Adjacent To", "ki baghal wali gali me": "Street Adjacent To",
-    "ke pass": "Near", "ki pass": "Near", 
-    "ke samne": "Opposite", "ki samne": "Opposite", 
-    "ke peeche": "Behind", "ke piche": "Behind", 
-    "ki peeche": "Behind", "ki piche": "Behind",
-    "ke baghal me": "Adjacent To", "ki baghal me": "Adjacent To", 
-    "ke baraber me": "Adjacent To", "ke barabar me": "Adjacent To",
-    "ki baraber me": "Adjacent To", "ki barabar me": "Adjacent To",
-    "ki back side pe": "Behind", "ke back side pe": "Behind"
-}
 
-FORMAT_ORDER = ["BUILDING", "UNIT", "BLOCK", "STREET", "SOCIETY", "AREA", "TOWN", "LANDMARK", "CITY", "PROVINCE"]
+def _extract_pdf_addresses(data: bytes) -> list[str]:
+    reader = PdfReader(io.BytesIO(data))
+    lines: list[str] = []
+    for page in reader.pages:
+        page_text = page.extract_text() or ""
+        lines.extend(part.strip() for part in page_text.splitlines())
+    deduped = list(dict.fromkeys(line for line in lines if len(line) > 2))
+    return deduped
 
-class AddressRequest(BaseModel):
-    address: str
 
-def clean_input_text(text: str) -> str:
-    return re.sub(r'[^\w\s/]', ' ', text).strip()
+@app.get("/health")
+def health() -> dict[str, str]:
+    return {"status": "ok"}
 
-def normalize_term(text: str) -> str:
-    normalized = text.lower()
-    for urdu, eng in POSITIONAL_MAP.items():
-        if urdu in normalized:
-            cleaned_base = normalized.replace(urdu, "").strip()
-            normalized = f"{eng.lower()} {cleaned_base}"
-            break 
-    for urdu, eng in DIRECT_REPLACE_MAP.items():
-        if urdu in normalized:
-            normalized = normalized.replace(urdu, eng.lower())
-    return " ".join(normalized.split()).title()
 
-@app.post("/parse")
-async def parse_address(request: AddressRequest):
-    if not request.address.strip():
-        raise HTTPException(status_code=400, detail="Address cannot be empty")
-        
-    cleaned_text = clean_input_text(request.address)
-    doc = nlp_model(cleaned_text)
-    
-    extracted = {}
-    mapped_chars = 0
-    
-    for ent in doc.ents:
-        extracted[ent.label_] = ent.text
-        mapped_chars += len(ent.text.replace(" ", ""))
-    
-    if "TOWN" not in extracted:
-        check_string = (extracted.get("AREA", "") + " " + extracted.get("SOCIETY", "")).lower()
-        for area_key, town_val in AREA_TOWN_MAP.items():
-            if area_key in check_string:
-                extracted["TOWN"] = town_val
-                break
+@app.post("/api/address/parse", response_model=ParseAddressResponse)
+def parse_address(payload: ParseAddressRequest) -> ParseAddressResponse:
+    address = payload.address.strip()
+    if not address:
+        raise HTTPException(status_code=400, detail="Address is required")
+    try:
+        structured = _parse_with_gemini(address)
+    except (ValueError, json.JSONDecodeError, ValidationError) as exc:
+        raise HTTPException(status_code=502, detail=f"Invalid Gemini response: {exc}") from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    return ParseAddressResponse(original=address, structured=structured)
 
-    if "CITY" not in extracted:
-        check_string = (extracted.get("TOWN", "") + " " + extracted.get("SOCIETY", "")).lower()
-        for town_key, city_val in TOWN_CITY_MAP.items():
-            if town_key in check_string:
-                extracted["CITY"] = city_val
-                break
-                
-    city_name = extracted.get("CITY", "").lower()
-    if city_name in CITY_PROVINCE_MAP:
-        extracted["PROVINCE"] = CITY_PROVINCE_MAP[city_name]
-        
-    total_chars = len(cleaned_text.replace(" ", ""))
-    success_ratio = round((mapped_chars / total_chars) * 100) if total_chars > 0 else 0
-    
-    formatted_parts = []
-    for key in FORMAT_ORDER:
-        if key in extracted:
-            formatted_parts.append(normalize_term(extracted[key]))
-            
-    formatted_string = ", ".join(formatted_parts)
-    
-    return {
-        "original_text": request.address,
-        "success_ratio": f"{success_ratio}%",
-        "formatted_address": formatted_string,
-        "structured_address": extracted
-    }
+
+@app.post("/api/address/bulk", response_model=list[BulkItem])
+async def parse_bulk(file: UploadFile = File(...)) -> list[BulkItem]:
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="File is required")
+
+    content = await file.read()
+    name = file.filename.lower()
+    content_type = file.content_type or ""
+
+    try:
+        if name.endswith(".csv") or "csv" in content_type:
+            addresses = _extract_csv_addresses(content)
+        elif name.endswith(".pdf") or "pdf" in content_type:
+            addresses = _extract_pdf_addresses(content)
+        else:
+            raise HTTPException(status_code=400, detail="Only CSV and PDF files are supported")
+
+        if not addresses:
+            raise HTTPException(status_code=400, detail="No valid addresses found in uploaded file")
+
+        results: list[BulkItem] = []
+        for address in addresses:
+            structured = _parse_with_gemini(address)
+            results.append(BulkItem(original=address, structured=structured))
+        return results
+    except HTTPException:
+        raise
+    except (ValueError, json.JSONDecodeError, ValidationError) as exc:
+        raise HTTPException(status_code=502, detail=f"Invalid Gemini response: {exc}") from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
