@@ -1,18 +1,19 @@
 from __future__ import annotations
-from dotenv import load_dotenv
-load_dotenv()
 import csv
 import io
 import json
 import os
 import re
 from typing import Any
+from dotenv import load_dotenv
 
 import google.generativeai as genai
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, ValidationError
 from pypdf import PdfReader
+
+load_dotenv()
 
 class Settings(BaseModel):
     gemini_api_key: str = Field(default_factory=lambda: os.getenv("GEMINI_API_KEY", ""))
@@ -30,7 +31,10 @@ model = genai.GenerativeModel(
     generation_config={"response_mime_type": "application/json"}
 )
 
-prompt_template = """Extract address components for India/Pakistan (supports Roman Urdu/Hindi). 
+prompt_template = """Extract and translate address components for India/Pakistan. 
+CRITICAL: You must translate all Roman Urdu/Hindi regional terms into standard English. 
+Examples: 'gali' -> 'street'/'lane', 'piche' -> 'behind', 'mohallah' -> 'area'/'neighborhood', 'samne' -> 'opposite', 'sarak' -> 'road', 'makan' -> 'house'. 
+The output values must be strictly in English.
 Return JSON: house_number, plot_number, street, block, phase, area, city, state, country, landmark, normalized_address."""
 
 class StructuredAddress(BaseModel):
